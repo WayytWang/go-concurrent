@@ -1,0 +1,216 @@
+# Go http库是如何创建web服务的
+
+- go几行代码就能搭建web服务
+
+  ```go
+  http.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
+  	fmt.Fprint(w, "hello, go")
+  })
+  http.ListenAndServe(":8080",nil)
+  ```
+
+- 这就启动了一个监听在8080端口上的web服务，并且通过 http://localhost:8080/hello地址就能得到hello, go的响应。这里不区分http请求方式，http库的路由匹配没有区分请求方式。
+
+- 在看http库代码之前，其实也能想到几个必须要做的事情
+
+  - 1.启动一个不间断的服务。
+  - 2.接收客户端的请求并处理请求。
+  - 3.接收到请求后做路由匹配，找到请求对应的处理函数并且执行。
+
+  当然http库做的事情非常多，这些只是主线。
+
+
+
+## http.HandleFunc
+
+- http.HandleFunc源码的调用链可由下图简洁的表示
+
+![](D:\go_space\my_hade\pic\http.HandleFunc.png)
+
+- http.HandleFunc的代码:
+
+  ```go
+    // HandleFunc registers the handler function for the given pattern
+    // in the DefaultServeMux.
+    // The documentation for ServeMux explains how patterns are matched.
+    func HandleFunc(pattern string, handler func(ResponseWriter, *Request)) {
+    	DefaultServeMux.HandleFunc(pattern, handler)
+    }
+  ```
+
+    - 从注释和方法签名中能看出几个点:
+
+      - HandleFunc的第二个参数的函数签名是 func(ResponseWriter, *Request)
+
+      - DefaultServeMux
+      - register the handler function for the give pattern
+
+  ### func(ResponseWriter, *Request)
+
+  - http.HandleFunc中的handler参数必须满足func(ResponseWriter, *Request)的签名。
+
+  - 在第二步中能看到对handler做了一个类型转换,将handler转换成了HandlerFunc类型。
+
+    ```go
+    mux.Handle(pattern, HandlerFunc(handler))
+    ```
+
+    - HandlerFunc类型的定义如下
+
+      ```go
+      type HandlerFunc func(ResponseWriter, *Request)
+      
+      // ServeHTTP calls f(w, r).
+      func (f HandlerFunc) ServeHTTP(w ResponseWriter, r *Request) {
+      	f(w, r)
+      }
+      ```
+
+      - HandlerFunc实现ServeHTTP方法，实现内容就是执行自身。
+
+      - HandlerFunc实现了ServeHTTP方法,从而实现了Handler接口。
+
+        ```go
+        type Handler interface {
+        	ServeHTTP(ResponseWriter, *Request)
+        }
+        ```
+
+        - 这个接口非常重要,http.ListenAndServe的部分还会有重要的作用。
+
+  - 总结一下
+
+    - http.HandleFunc函数的第二个参数名叫handler,它必须满足func(ResponseWriter, *Request)的签名。
+    - handler会被类型转换成HandlerFunc类型。
+    - HandlerFunc类型实现了Handler接口。
+
+  ### DefaultServeMux
+
+  - ```go
+    type ServeMux struct {
+    	mu    sync.RWMutex
+    	m     map[string]muxEntry
+    	es    []muxEntry // slice of entries sorted from longest to shortest.
+    	hosts bool       // whether any patterns contain hostnames
+    }
+    
+    type muxEntry struct {
+    	h       Handler
+    	pattern string
+    }
+    ```
+
+    - ServeMux结构体主要用来存储请求pattern和请求处理函数的关系，从而实现路由匹配的功能。
+      - 保存关系的具体结构是ServeMux.m的map[string]muxEntry。
+      - muxEntry定义的处理函数的类型已经是Handler接口了。
+    - DefaultServeMux是http库初始化好的ServeMux结构。
+
+  ### register the handler function for the give pattern
+
+  - DefaultServeMux是存储关系的数据结构，register the handler function for the give pattern是利用该数据结构保存关系的动作。
+
+  - register the handler function for the give pattern的步骤发生在第三步中，贴出来的代码省去了不影响主体流程理解的检验类代码。
+
+    ```go
+    // Handle registers the handler for the given pattern.
+    // If a handler already exists for pattern, Handle panics.
+    func (mux *ServeMux) Handle(pattern string, handler Handler) {
+    	mux.mu.Lock()
+    	defer mux.mu.Unlock()
+        
+    	e := muxEntry{h: handler, pattern: pattern}
+    	mux.m[pattern] = e
+        if pattern[len(pattern)-1] == '/' {
+    		mux.es = appendSorted(mux.es, e)
+    	}
+    
+    }
+    ```
+
+    - 通过以上的操作,pattern和handler就绑定上关系了。
+
+
+##   http.ListenAndServe
+
+- http.HandleFunc绑定了路由关系。
+- http.ListenAndServe需要做到：启动阻塞式的服务，不断的处理客户端的请求。同样先展示代码的主体调用链：
+
+
+
+![http.ListenAndServe](D:\go_space\my_hade\pic\http.ListenAndServe.png)
+
+- 第一步：
+
+  - 创建了一个&Server结构，由它来调用ListenAndServe函数，后续的事情都交给它来做。
+
+- 第二步：
+
+  - 关键动作是使用net库创建了一个网络服务，使用tcp协议监听指定的端口号，然后调用&Server的Serve函数。
+
+- 第三步：
+
+  - 在Serve中，启动了一个for循环，for具体做的事情在下一步时分析。
+  - for循环决定了整个服务是阻塞式的，会不断地处理请求。
+
+- 第四步：
+
+  - for循环中，l.Accept接收来自客户端的请求。
+  - srv.newConn为此次请求创建了一个结构:http.conn。
+  - c.setState将http.conn标记初始的状态值。
+  - go c.serve来执行具体的处理。而且这里使用了goroutine，所以go http库搭建的web服务是会为每一次客户端请求启用一个单独的goroutine来处理的。
+
+- 第五步：
+
+  - c.serve中，首先会判断此次连接是否需要升级到HTTPS协议。
+  - 然后分别创建读文本的reader和写文本的buffer。
+  - 再开启一个for循环来执行后续操作。
+    - 留下一个疑问，这里似乎已经具体到某一次的请求了，为什么还需要for循环来处理此次请求？
+
+- 第六步
+
+  - for循环中，最关键的步骤：serverHandler{c.server}.ServeHTTP(w, w.req)。
+
+  - serverHandler的定义如下：
+
+    ```go
+    type serverHandler struct {
+    	srv *Server
+    }
+    ```
+
+    - 它包含了*Server结构，也就是第一步时创建的&Server
+    - serverHandler实现了ServeHTTP方法，从而也实现了Handler接口。
+
+- 第7步：
+
+  - serverHandler.ServeHTTP方法的实现中，首先会判断serverHandler.*Server.Handler是否存在。
+    - 这个Handler的来源是启动web服务时`http.ListenAndServe(":8080",nil)`的第二个参数。
+    - 由于传的是nil，则会使用DefaultServeMux（ServeMux结构），而DefaultServeMux中是保存了pattern与handler的关系的。接下来就能通过请求中的路径找到对应的处理函数了。这就和http.HandlerFunc联系起来了。
+    - 其实很多go的web框架就是重写了ServeMux，而启动服务和接收客户端的请求还是复用的http库。
+  - 确定好要使用DefaultServeMux做为serverHandler.*Server.Handler后，就执行了DefaultServeMux.ServeHTTP
+
+- 第8步：
+
+  - DefaultServeMux是ServeMux结构的具体值，而ServeMux也是实现了Handller接口的（这个接口真是无处不在）。
+
+  - ServeMux的ServeHTTP的实现中：
+
+    - h,_ := mux.Handler(r)，通过r（*http.Request）中的请求路径找到对应的处理函数handler，handler之前描述过，被存储的时候已经是HandlerFunc类型，并且实现了Handler接口。
+      - 因为存pattern和handler关系的时候，使用的map，所以找处理函数的过程很简单，不过ServeMux没有区分请求方式，所以对同一个路径Get请求和Post请求没区别。很多web框架（上面说过，框架基本都重写了ServeMux）都重写了路由匹配的逻辑，区分了请求方式，有的还对路由关系的存储采用了更高效快捷的数据结构，比如trie树等。
+
+    - 执行handler.ServeHTTP，无处不在的Handler接口。之前描述过，HandlerFunc的ServeHTTP的实现实际上执行了本身。所以到这里请求结束了。
+
+
+
+## 回到那个没想明白的for循环
+
+- 到现在已经分析过了，http库是如何启动web服务，并且处理每一次请求的。
+- 刚刚留下了一个疑问，为何要在处理某一次请求中启动for循环？
+  - HTTP的keep-alive机制。keep-alive机制能非常显著的提升服务性能，从两个角度来分析：
+    - 节省建立TCP连接的角度：
+      - HTTP连接是基于TCP连接的。理论上当发起一次全新的HTTP连接的时候，需要先建立TCP连接，而TCP连接的建立是需要三次握手的，开销比较大，如果能复用TCP连接能节省很多时间。
+    - 服务器 TIME_WAIT的角度：
+      - 客户端发完请求，服务端处理完之后，如果没有后续动作，那么服务端就需要主动断开TCP连接了。
+      - 断开连接需要四次挥手，根据TCP协议，主动发起断开的一方最后需要有一个TIME_WAIT的阶段，时间长达2MSL。
+      - 如果服务端为每一次请求都去处理TIME_WAIT阶段，显然是开销比较大的。
+  - 综上，服务端如果在处理请求中启动了for循环，在开启了keep-alive的情况下，就不会主动关闭连接，要么能复用连接，要么交给客户端主动断开，从而转移了服务端处理TIME_WAIT的压力。
