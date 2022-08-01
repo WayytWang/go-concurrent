@@ -1,22 +1,35 @@
 # Mutex的实现
 
-- 互斥锁
-- todo：写一些基本的介绍
-- Lock方法会尝试获得锁，获得不成功会阻塞住，直到获取成功。
+- 虽然go鼓励用通信的方式来共享内存，但是用共享内存的方式来通信依然是不可或缺的。
+- 比如某一个变量或者某一段代码，可能会被多个协程同时执行，但是我又只希望同一时刻只有一个协程能操作，就需要用到互斥锁。这个变量或者这段代码称为临界区。每一个协程在执行临界区代码前，都需要使用互斥锁的Lock方法尝试抢执行权，如果抢不到会阻塞住，直到抢到了才能往后执行。当执行完后需要使用互斥锁的UnLock方法将执行权交出去，以便于其他协程能抢到执行权。
+- 本文的逻辑是通过一步步实现互斥锁的方式，来分析go标准库的Mutex的原理。从而可以尽可能避免在使用过程中踩到莫名奇妙的坑。
 
-## 自己实现一个简单的互斥锁
 
-### CAS
 
-- CAS：compare and swap
+在开始实现互斥锁时，先要了解CAS
 
-- CAS(compare and swap)，比较并交换。
-- atomic.CompareAndSwapInt32方法接收三个入参，一个指针addr，一个旧值old，一个新值new
-- 这个操作分为三步
-  - 取addr指向的值
-  - 与old比较，不等于操作终止
-  - 将addr指向的值改成new
-- 关键在于，机器层面保证了这三步的原子性，既执行过程中不会被其他线程所打断。
+## CAS
+
+- CAS(compare and swap)意思是比较并交换。
+
+- 以go标准库中的atomic.CompareAndSwapInt32方法为例
+
+  ```go
+  // CompareAndSwapInt32 executes the compare-and-swap operation for an int32 value.
+  func CompareAndSwapInt32(addr *int32, old, new int32) (swapped bool)
+  ```
+
+  - 它接收三个入参，一个指针addr，一个旧值old，一个新值new
+  - 这个操作分为三步:
+    - 首先取addr指向的值
+    - 然后与old比较，如果不相等，返回false，操作失败。
+    - 最后将addr指向的值改成new
+  - 关键在于，机器层面保证了这三步的原子性，既执行过程中不会被其他协程所打断。
+    - 普通代码可能是执行过程中突然被打断，cpu去执行其他协程了。
+
+## 开始实现互斥锁
+
+### v0版本
 
 ```go
 package v0
@@ -36,11 +49,15 @@ func (m *Mutex) Lock(){
 }
 
 func (m *Mutex) Unlock() {
-	atomic.CompareAndSwapInt32(&m.key,1,0)
+    atomic.CompareAndSwapInt32(&m.key,1,0) 
 }
 ```
 
-### Lock
+#### Mutex
+
+- 包含key字段，来记录锁的状态
+
+#### Lock
 
 - for循环不断的尝试CAS操作
   - 假设有两个协程g1,g2在竞争同一把锁
@@ -49,7 +66,7 @@ func (m *Mutex) Unlock() {
   - g1对临界资源的操作完毕，调用了Unlock方法，通过CAS将key值改回了0。
   - g2的Lock方法成功。
 
-### 问题
+#### 问题
 
 - 虽然实现了需求，但是毫无性能可言。g1什么正事也干不了，但是一直吃着cpu的资源。
 
