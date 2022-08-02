@@ -25,7 +25,7 @@
     - 然后与old比较，如果不相等，返回false，操作失败。
     - 最后将addr指向的值改成new
   - 关键在于，机器层面保证了这三步的原子性，既执行过程中不会被其他协程所打断。
-    - 普通代码可能是执行过程中突然被打断，cpu去执行其他协程了。
+    - 普通代码可能在执行过程中突然被打断，cpu转而去执行其他协程了。
 
 ## 开始实现互斥锁
 
@@ -90,7 +90,7 @@ func (m *Mutex) Unlock() {
 - semacquire
 - semrelease
 
-### 
+
 
 Lock方法和Unlock方法不在是对key做0和1之间的替换了，而是采用+1和-1操作
 
@@ -115,10 +115,13 @@ func xadd(val *int32, delta int32) (new int32) {
 
 - for循环中通过CAS改变val的值，val是key，delta是±1
 
-- 这里也有for循环，for循环是因为有多个goroutine同时在竞争CAS操作， 但是和v0版本的for循环有很大区别
+- 这里也有for循环，for循环是因为有多个goroutine同时在竞争CAS操作
 
-  - v0版本一旦失败后，是要等到拿到锁的goroutine执行完临界区才行，因为只有Unlock操作才会将key从1改成0
-  - v1发生失败是因为其他goroutine已经改掉了addr指向的值，只需要等下一次循环中将val重新读出来就行
+  - 从`v := *val`到CAS之间可不是原子操作，有可能刚刚拿到的v=1，等到执行到CAS这一行时，被其他执行这段逻辑的协程改成2了。所以需要for循环去保证CAS成功。
+  
+- 但是和v0版本的for循环有很大区别
+
+  - v0的目的是0和1之间做交换，抢锁时从0到1，for循环不仅在一起抢锁的协程在竞争，还在等着已经有锁的协程释放锁。
 
   
 
@@ -137,7 +140,7 @@ func (m *Mutex) Lock() {
 ```
 
 - xadd执行完后，key值如果等于1，那证明当前goroutine已经拿到了锁，可以直接返回执行后续临界区代码了
-- 如果key值大于1，那证明已经拿到了锁，不过前面还有goroutine在用得去排队。
+- 如果key值大于1，那证明已经拿到了锁的待使用资格，不过还有其他协程也拿到了待使用资格，得去排队。
 - 这里排队的方式是将自己休眠，而不是v0那样疯狂循环消耗CPU资源
 
 ### UnLock
@@ -154,11 +157,10 @@ func (m *Mutex) Unlock() {
 }
 ```
 
-- 调用Unlock的方法的goroutine一定是当年Lock时key=1的时候走的
+- Unlock方法就是需要将key减去1，如果操作完后key==0，不用管了直接返回。
 - 如果没有其他goroutine在Lock，这是xadd方法后，key就变成0，这是不用管了直接返回就好了
 - 但是执行临界区代码的这段日子里，可能有很多goroutine在排队。他们会对key做+1的操作
-- 这时，即使对key-1了，key的值也不会等于0
-- 那些排队的goroutine，这会休眠呢，需要叫一个起来，不能偷偷的返回了。
+- 所以这里key可能大于0，证明有一些goroutine在排队，那些排队的goroutine，这会休眠需要被唤醒，所以Unlock这不能偷偷的返回了
 
 ### 问题
 
@@ -174,22 +176,7 @@ func (m *Mutex) Unlock() {
 
 ### mutex结构
 
-- state
-  - 由key变成了state
-  - state是一个复合型的字段，通过int32所占用的32个bit的不同部分表示不同意义，采用位运算
-  - state分为三个部分 mutexWaiters|mutexWoken|mutexLocked
-  - mutexWaiters表示锁的等待者数量
-  - mutexWoken表示锁是否有唤醒的goroutine
-  - mutexLocked表示锁是否被持有
-- sema
-  - 依然做为goroutine休眠与唤起的信号量
-
-
-
-
-
 ```go
-
    type Mutex struct {
         state int32
         sema  uint32
@@ -203,7 +190,15 @@ func (m *Mutex) Unlock() {
     )
 ```
 
-
+- state
+  - 由key变成了state
+  - state的类型是int32，由32个bit组成
+  - 32bit的state可分为三个部分 mutexWaiters|mutexWoken|mutexLocked，所以state是一个复合型字段
+    - mutexWaiters表示锁的等待者数量
+    - mutexWoken表示锁是否有唤醒的goroutine
+    - mutexLocked表示锁是否被持有
+- sema
+  - 依然做为goroutine休眠与唤起的信号量
 
 ### Lock
 
