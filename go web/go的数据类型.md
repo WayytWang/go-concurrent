@@ -54,6 +54,8 @@ chan
 
 
 
+var：声明一个变量
+
 从值类型和引用类型开始
 
 ```go
@@ -88,17 +90,11 @@ log.Println(p == nil)
 - channel
 - 指针是指向某个类型
 
+申明的时候，就给该变量指定了一个数据类型
+
+而对有值类型的数据来看：
 
 
-```go
-var i int
-log.Println(&i)
 
-var s []int
-log.Println(s == nil)
-```
 
-var：声明一个变量
-
-对于int类型的i，会发现i
 
